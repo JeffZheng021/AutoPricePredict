@@ -1,0 +1,305 @@
+---
+title: "Appendix: Code"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(dplyr)
+library(tidyr)
+library(lmtest)
+library(MASS)
+```
+
+# Introduction
+The pricing of automobiles is influenced by a myriad of factors, ranging from brand reputation and technical specifications to consumer sentiment and market trends. Understanding the relationships between these factors and a car's Manufacturer’s Suggested Retail Price (MSRP) is critical for stakeholders such as manufacturers, consumers, and market analysts. This project seeks to explore the dynamics between car features and pricing through a comprehensive regression analysis.
+
+Utilizing a dataset from Kaggle that encompasses car attributes such as make, model, year, engine specifications, and social metrics like popularity, this analysis aims to uncover the key determinants of car prices. By investigating the effects of various features, the role of branding, and the potential for overpricing, the study aspires to deliver insights that could guide pricing strategies and consumer decisions. Additionally, this project will assess the interplay between price and popularity, shedding light on how consumer preferences align with pricing trends.
+
+The report presents the goals of this analysis, the methodology employed, the results obtained, and their implications, providing a detailed and data-driven perspective on the automotive market.
+
+# Description of Data Set
+```{r}
+data = read.csv("data.csv")
+
+head(data)
+```
+
+The dataset consists of 11,914 entries and 16 columns, containing information about cars, their features, and their corresponding Manufacturer’s Suggested Retail Prices (MSRP). Below is an overview of the variables in the dataset:
+
+1. Make: The manufacturer or brand of the car (e.g., BMW, Ford).
+2. Model: The specific model of the car.
+3. Year: The year the car model was manufactured.
+4. Engine Fuel Type: The type of fuel the engine uses (e.g., premium unleaded, diesel).
+5. Engine HP: The horsepower of the engine, indicating its power output.
+6. Engine Cylinders: The number of cylinders in the engine.
+7. Transmission Type: The type of transmission system (e.g., automatic, manual).
+8. Driven_Wheels: The drivetrain configuration (e.g., rear-wheel drive, all-wheel drive).
+9. Number of Doors: The number of doors on the car.
+10. Market Category: A categorization of the car based on market positioning (e.g., luxury, high-performance).
+11. Vehicle Size: The size classification of the vehicle (e.g., compact, midsize).
+12. Vehicle Style: The style or body type of the vehicle (e.g., sedan, SUV).
+13. Highway MPG: The fuel efficiency of the car on the highway, measured in miles per gallon.
+14. City MPG: The fuel efficiency of the car in city driving conditions, measured in miles per gallon.
+15. Popularity: A numeric measure indicating the car's popularity.
+16. MSRP: The Manufacturer’s Suggested Retail Price, indicating the car's price.
+
+The dataset includes a mix of numerical and categorical variables, with some columns containing missing values. The target variable for the regression analysis is MSRP, while the other columns provide features that can potentially influence the price.
+
+```{r}
+# Set a random seed for reproducibility
+set.seed(88)
+
+# Randomly sample 600 row indices
+random_indices <- sample(1:nrow(data), size = 600, replace = FALSE)
+
+# Select the 600 rows for transformation
+subset_data <- data[random_indices, ]
+```
+
+Here we'll choose 500 random entries as our training data for the model training and analysis.
+
+# Analysis
+
+## Feature Selection
+```{r}
+# Step 1: Add a temporary Row_ID to track rows
+subset_data <- subset_data %>%
+  mutate(Row_ID = row_number())  # Create a unique identifier for each row
+
+# Step 2: Extract Market.Category into a separate DataFrame
+market_category_df <- subset_data %>%
+  dplyr::select(Row_ID, Market.Category) 
+
+# Step 3: Split and preprocess Market.Category
+market_category_df <- market_category_df %>%
+  mutate(Market.Category = ifelse(is.na(Market.Category), "", Market.Category)) %>%
+  separate_rows(Market.Category, sep = ",") %>%  # Split categories into separate rows
+  mutate(Market.Category = trimws(Market.Category))  # Clean up spaces
+
+# Step 4: Create one-hot encoding for categories
+market_category_df <- market_category_df %>%
+  mutate(Dummy = 1) %>%  # Add a helper column for dummy encoding
+  pivot_wider(names_from = Market.Category, 
+              values_from = Dummy, 
+              values_fill = list(Dummy = 0))
+
+# Step 5: Aggregate One-Hot Encoded Data
+market_category_df <- market_category_df %>%
+  group_by(Row_ID) %>%
+  summarise(across(everything(), ~ max(.x, na.rm = TRUE))) %>%
+  ungroup()
+
+# Step 6: Merge Back with subset_data
+# Remove the original Market.Category column from training_data
+subset_data <- subset_data %>%
+  dplyr::select(-Market.Category)
+
+# Step 7: Merge the one-hot encoded data back into training_data
+subset_data <- subset_data %>%
+  left_join(market_category_df, by = "Row_ID")
+
+# Remove NA columns
+subset_data <- na.omit(subset_data)
+colSums(is.na(subset_data))
+
+# Split the 600 rows into training (500) and testing (100)
+training_data <- subset_data[1:500, ]
+test_data <- subset_data[501:600, ]
+```
+
+We do believe before even fitting it into any specific model, we have to acknowledge that Market.Category would be potentially a very significant predictor to our model and making it into dummies would be a better indicator for the overall prediction. After this has been done, we also standardized columns so it would be on a similar scale when fitted. We will then consider to fit it into a MLR model, with MSRP being the dependent variable and test using AIC and BIC with stepwise to gain the best model. We will first start with all of the predictors first and continue from there to see if we would also need interation terms.
+
+# Model Assumptions
+```{r}
+# Fitting the initial model
+model <- lm(MSRP ~ Year + Engine.HP + Engine.Cylinders + Number.of.Doors +
+               highway.MPG + city.mpg + Popularity + Crossover + `Factory Tuner` +
+               Performance + `High-Performance` + Luxury + `Flex Fuel` + Exotic +
+               Hatchback + Diesel + Hybrid, data = training_data)
+summary(model)
+
+# Residuals vs Fitted plot
+plot(model$fitted.values, rstandard(model),
+     main = "Residuals vs Fitted Values",
+     xlab = "Fitted Values",
+     ylab = "Standardized Residuals")
+abline(h = 0, col = "red")
+
+# Q-Q plot for residuals
+qqnorm(residuals(model), main = "Q-Q Plot of Residuals")
+qqline(residuals(model), col = "red")
+```
+As we see here, our initial fitment does show a significant violation with equal variance, normality and also linearity. As Var(e) is showing us a quadratic function of $\hat{Y}$, so we'll now fit it with a log transformation.
+
+## Y tranformation
+```{r}
+# Fitting the initial model
+model <- lm(log(MSRP) ~ Year + Engine.HP + Engine.Cylinders + Number.of.Doors +
+               highway.MPG + city.mpg + Popularity + Crossover + `Factory Tuner` +
+               Performance + `High-Performance` + Luxury + `Flex Fuel` + Exotic +
+               Hatchback + Diesel + Hybrid, data = training_data)
+
+# Residuals vs Fitted plot
+plot(model$fitted.values, rstandard(model),
+     main = "Residuals vs Fitted Values",
+     xlab = "Fitted Values",
+     ylab = "Standardized Residuals")
+abline(h = 0, col = "red")
+
+# Q-Q plot for residuals
+qqnorm(residuals(model), main = "Q-Q Plot of Residuals")
+qqline(residuals(model), col = "red")
+```
+
+## Interaction Term
+```{r}
+model_interaction <- lm(log(MSRP) ~ Year * Engine.HP + Engine.Cylinders * highway.MPG +
+                          city.mpg * Popularity + Number.of.Doors * Luxury +
+                          Crossover + `Factory Tuner` + Performance +
+                          `High-Performance` + Exotic + Diesel + Hybrid, 
+                        data = training_data)
+
+model_interaction_step <- step(model_interaction, direction = "both")
+summary(model_interaction_step)
+
+plot(model_interaction_step$fitted.values, rstandard(model_interaction_step),
+     main = "Residuals vs Fitted Values (Interaction Model)",
+     xlab = "Fitted Values",
+     ylab = "Standardized Residuals")
+abline(h = 0, col = "red")
+
+qqnorm(residuals(model_interaction_step), main = "Q-Q Plot of Residuals (Interaction Model)")
+qqline(residuals(model_interaction_step), col = "red")
+bptest(model_interaction_step)
+
+shapiro.test(residuals(model_interaction_step))
+
+```
+
+## Box-cox Transformation
+```{r}
+boxcox_result <- boxcox(model, lambda = seq(-2, 2, 0.1))
+
+lambda_optimal <- boxcox_result$x[which.max(boxcox_result$y)]
+lambda_optimal
+
+if (lambda_optimal == 0) {
+  training_data$MSRP_transformed <- log(training_data$MSRP)
+} else {
+  training_data$MSRP_transformed <- (training_data$MSRP^lambda_optimal - 1) / lambda_optimal
+}
+
+model_boxcox <- lm(MSRP_transformed ~ Year + Engine.HP + Engine.Cylinders + Number.of.Doors +
+                     highway.MPG + city.mpg + Popularity + Crossover + `Factory Tuner` +
+                     Performance + `High-Performance` + Luxury + `Flex Fuel` + Exotic +
+                     Hatchback + Diesel + Hybrid, data = training_data)
+
+summary(model_boxcox)
+
+plot(model_boxcox$fitted.values, rstandard(model_boxcox),
+     main = "Residuals vs Fitted Values (Box-Cox)",
+     xlab = "Fitted Values",
+     ylab = "Standardized Residuals")
+abline(h = 0, col = "red")
+
+qqnorm(residuals(model_boxcox), main = "Q-Q Plot of Residuals (Box-Cox)")
+qqline(residuals(model_boxcox), col = "red")
+
+library(lmtest)
+bptest(model_boxcox)
+
+shapiro.test(residuals(model_boxcox))
+```
+
+# AIC Predictor Deletion (stepwise)
+```{r}
+# Perform backward stepwise selection
+model_step <- step(model, direction = "both")
+summary(model_step)
+AIC(model, model_step)
+
+# Residuals vs Fitted plot
+plot(model_step$fitted.values, rstandard(model_step),
+     main = "Residuals vs Fitted Values",
+     xlab = "Fitted Values",
+     ylab = "Standardized Residuals")
+abline(h = 0, col = "red")
+
+# Q-Q plot for residuals
+qqnorm(residuals(model_step), main = "Q-Q Plot of Residuals")
+qqline(residuals(model_step), col = "red")
+```
+
+# Output and Result
+
+## Explaination With One Entry
+```{r}
+# Randomly pick one row from the test set
+set.seed(88)  # For reproducibility
+test_row <- test_data[sample(nrow(test_data), 1), ]
+
+# View the selected row
+print(test_row)
+```
+```{r}
+# Make prediction for the selected row
+predicted_log_MSRP <- predict(model_step, newdata = test_row)
+
+# Transform the log(MSRP) back to the original scale
+predicted_MSRP <- exp(predicted_log_MSRP)
+
+# Get the actual MSRP from the test row
+actual_MSRP <- test_row$MSRP
+
+# Compare predicted vs actual MSRP
+cat("Predicted MSRP:", round(predicted_MSRP, 2), "\n")
+cat("Actual MSRP:", actual_MSRP, "\n")
+
+# Calculate error metrics
+absolute_error <- abs(predicted_MSRP - actual_MSRP)
+percentage_error <- (absolute_error / actual_MSRP) * 100
+
+cat("Absolute Error:", round(absolute_error, 2), "\n")
+cat("Percentage Error:", round(percentage_error, 2), "%\n")
+```
+
+## Overall Testing Result
+```{r}
+# Make prediction for all
+test_data <- na.omit(test_data)
+predictions <- exp(predict(model_step, newdata = test_data))
+
+#Get the actual MSRP from the test data
+actual <- test_data$MSRP
+
+# Calculate errors
+errors <- actual - predictions
+
+# Mean Absolute Error (MAE)
+mae <- mean(abs(errors))
+
+# Mean Squared Error (MSE)
+mse <- mean(errors^2)
+
+# Root Mean Squared Error (RMSE)
+rmse <- sqrt(mse)
+
+# R-squared (R^2)
+ss_total <- sum((actual - mean(actual))^2)
+ss_residual <- sum(errors^2)
+r_squared <- 1 - (ss_residual / ss_total)
+
+# Print results
+cat("Mean Absolute Error (MAE):", round(mae, 2), "\n")
+cat("Mean Squared Error (MSE):", round(mse, 2), "\n")
+cat("Root Mean Squared Error (RMSE):", round(rmse, 2), "\n")
+cat("R-squared (R^2):", round(r_squared, 4), "\n")
+
+plot(actual, predictions,
+     xlab = "Actual MSRP", ylab = "Predicted MSRP",
+     main = "Predicted vs Actual MSRP")
+abline(0, 1, col = "red")
+
+```
